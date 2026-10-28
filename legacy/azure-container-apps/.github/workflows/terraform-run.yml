@@ -1,0 +1,81 @@
+name: terraform-run
+
+# Reusable: init + plan (+ apply) for one environment.
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      apply:
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+env:
+  TF_VERSION: "1.9.8"
+
+jobs:
+  terraform:
+    name: ${{ inputs.apply && 'apply' || 'plan' }} (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    # Plan uses "<env>-plan" (no approval gate); apply uses "<env>" (protection rules apply).
+    environment: ${{ inputs.apply && inputs.environment || format('{0}-plan', inputs.environment) }}
+    concurrency:
+      group: terraform-${{ inputs.environment }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: infra
+    env:
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      ENV_DIR: ../environments/${{ inputs.environment }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Init
+        run: terraform init -backend-config="$ENV_DIR/backend.hcl"
+
+      - name: Plan
+        run: |
+          terraform plan -lock-timeout=5m -var-file="$ENV_DIR/terraform.tfvars" -out=tfplan
+          terraform show -no-color tfplan > plan.txt
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request' && !inputs.apply
+        uses: actions/github-script@v7
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        with:
+          script: |
+            const fs = require('fs');
+            const max = 60000;
+            let plan = fs.readFileSync('infra/plan.txt', 'utf8');
+            if (plan.length > max) plan = plan.slice(0, max) + '\n... (truncated, see workflow logs)';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `### Terraform plan: \`${process.env.TARGET_ENV}\`\n<details><summary>Show plan</summary>\n\n\`\`\`hcl\n${plan}\n\`\`\`\n</details>`
+            });
+
+      - name: Apply
+        if: inputs.apply
+        run: terraform apply -lock-timeout=5m tfplan

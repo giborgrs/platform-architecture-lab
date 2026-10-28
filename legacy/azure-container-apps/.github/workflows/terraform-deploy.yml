@@ -1,0 +1,39 @@
+name: terraform-deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "modules/**"
+      - "environments/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  dev:
+    uses: ./.github/workflows/terraform-run.yml
+    with:
+      environment: dev
+      apply: true
+    secrets: inherit
+
+  qa:
+    needs: dev
+    uses: ./.github/workflows/terraform-run.yml
+    with:
+      environment: qa
+      apply: true
+    secrets: inherit
+
+  prod:
+    needs: qa
+    uses: ./.github/workflows/terraform-run.yml
+    with:
+      environment: prod
+      apply: true
+    secrets: inherit
